@@ -1,142 +1,169 @@
-import logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-from services.user_services import UsersService
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, current_app, jsonify, request
 from flask_jwt_extended import create_access_token
+from werkzeug.security import generate_password_hash
 
-from config.database import get_db_session
-
-service = UsersService(get_db_session())
-
-
-user_bp = Blueprint('users', __name__)
-
-
-
-@user_bp.route('/login', methods=['POST'])
-def login():
-    """
-    POST /login
-    Autentica a un usuario y retorna un token JWT si las credenciales son correctas.
-    Parámetros esperados (JSON):
-        username (str): Nombre de usuario.
-        password (str): Contraseña del usuario.
-    Respuesta: JSON con el token JWT o mensaje de error si las credenciales son inválidas.
-    """
-    data = request.get_json() or {}
-    username = data.get('username')
-    password = data.get('password')
-    if not username or not password:
-        logger.warning("Login fallido: usuario o contrasena no proporcionados")
-        return jsonify({'error': 'El nombre de usuario y la contrasena son obligatorios'}), 400
-    user = service.authenticate_user(username, password)
-    if user:
-        # Crear token JWT y devolverlo al cliente
-        access_token = create_access_token(identity=user.id)
-        return jsonify({'access_token': access_token, 'user': {'id': user.id, 'username': user.username}}), 200
-    return jsonify({'error': 'Credenciales invalidas'}), 401
-
-@user_bp.route('/users', methods=['GET'])
-def get_users():
-    """
-    GET /users
-    Recupera y retorna todos los usuarios registrados en el sistema.
-    Utiliza la capa de servicios para obtener la lista completa de usuarios.
-    No recibe parámetros.
-    Respuesta: JSON con la lista de usuarios.
-    """
-    users = service.get_all_users()
-    logger.info("Consulta de todos los usuarios")
-    return jsonify([{'id': u.id, 'username': u.username} for u in users]), 200, {'Content-Type': 'application/json; charset=utf-8'}
-
-@user_bp.route('/users/<int:user_id>', methods=['GET'])
-def get_user(user_id):
-    """
-    GET /users/<user_id>
-    Recupera la información de un usuario específico por su ID.
-    Parámetros:
-        user_id (int): ID del usuario a consultar (en la URL).
-    Respuesta: JSON con los datos del usuario o 404 si no existe.
-    """
-    user = service.get_user_by_id(user_id)
-    if user:
-        logger.info(f"Consulta de usuario por ID: {user_id}")
-        return jsonify({'id': user.id, 'username': user.username}), 200, {'Content-Type': 'application/json; charset=utf-8'}
-    logger.warning(f"Usuario no encontrado: {user_id}")
-    return jsonify({'error': 'Usuario no encontrado'}), 404, {'Content-Type': 'application/json; charset=utf-8'}
-
-@user_bp.route('/registry', methods=['POST'])
-def create_user():
-    """
-    POST /registry
-    Crea un nuevo usuario.
-    Parámetros esperados (JSON):
-        username (str): Nombre de usuario.
-        password (str): Contraseña del usuario.
-    Respuesta: JSON con los datos del usuario creado.
-    """
-    data = request.get_json()
-    username = data.get('username')
-    password = data.get('password')
-    if not username or not password:
-        logger.warning("Registro fallido: usuario o contraseña no proporcionados")
-        return jsonify({'error': 'El nombre de usuario y la contraseña son obligatorios'}), 400, {'Content-Type': 'application/json; charset=utf-8'}
-    user = service.create_user(username, password)
-    logger.info(f"Usuario creado: {username}")
-    return jsonify({'id': user.id, 'username': user.username}), 201, {'Content-Type': 'application/json; charset=utf-8'}
-
-@user_bp.route('/users/<int:user_id>', methods=['PUT'])
-def update_user(user_id):
-    """
-    PUT /users/<user_id>
-    Actualiza la información de un usuario existente.
-    Parámetros:
-        user_id (int): ID del usuario a actualizar (en la URL).
-    Parámetros esperados (JSON):
-        username (str, opcional): Nuevo nombre de usuario.
-        password (str, opcional): Nueva contraseña del usuario.
-    Respuesta: JSON con los datos del usuario actualizado o 404 si no existe.
-    """
-    data = request.get_json()
-    username = data.get('username')
-    password = data.get('password')
-    user = service.update_user(user_id, username, password)
-    if user:
-        logger.info(f"Usuario actualizado: {user_id}")
-        return jsonify({'id': user.id, 'username': user.username}), 200, {'Content-Type': 'application/json; charset=utf-8'}
-    logger.warning(f"Usuario no encontrado para actualizar: {user_id}")
-    return jsonify({'error': 'Usuario no encontrado'}), 404, {'Content-Type': 'application/json; charset=utf-8'}
-
-@user_bp.route('/users/<int:user_id>', methods=['DELETE'])
-def delete_user(user_id):
-    """
-    DELETE /users/<user_id>
-    Elimina un usuario del sistema.
-    Parámetros:
-        user_id (int): ID del usuario a eliminar (en la URL).
-    Respuesta: JSON confirmando la eliminación o 404 si no existe.
-    """
-    user = service.delete_user(user_id)
-    if user:
-        logger.info(f"Usuario eliminado: {user_id}")
-        return jsonify({'message': 'Usuario eliminado correctamente'}), 200, {'Content-Type': 'application/json; charset=utf-8'}
-    logger.warning(f"Usuario no encontrado para eliminar: {user_id}")
-    return jsonify({'error': 'Usuario no encontrado'}), 404, {'Content-Type': 'application/json; charset=utf-8'}
+from config.authorization import requires_permission, role_has_permission
+from models.inventory import PersistenceNotConfigured, ValidationError
+from repositories.pending_repositories import (
+    UnconfiguredAdministrationRepository,
+    UnconfiguredUserRepository,
+)
+from services.auth_service import AuthenticationService
 
 
-def register_jwt_error_handlers(app):
-    """
-    Registra manejadores mínimos de error para JWT en la app Flask.
-    Esta función es intencionalmente simple: devuelve JSON con el código de estado
-    para errores de autorización comunes. Se puede extender según sea necesario.
-    """
-    @app.errorhandler(401)
-    def _handle_401(err):
-        return jsonify({'error': 'Unauthorized'}), 401
+def _value(record, key):
+    if isinstance(record, dict):
+        return record.get(key)
+    return getattr(record, key, None)
 
-    @app.errorhandler(422)
-    def _handle_422(err):
-        return jsonify({'error': 'Invalid request'}), 422
 
-    return None
+def _public_data(value):
+    if isinstance(value, dict):
+        return {
+            key: _public_data(item)
+            for key, item in value.items()
+            if key not in {'password', 'password_hash'} and not key.startswith('_')
+        }
+    if isinstance(value, (list, tuple)):
+        return [_public_data(item) for item in value]
+    if hasattr(value, '__dict__'):
+        return _public_data(vars(value))
+    return value
+
+
+def create_user_blueprint(auth_repository=None, administration_repository=None):
+    blueprint = Blueprint('users', __name__)
+    authentication = AuthenticationService(auth_repository or UnconfiguredUserRepository())
+    administration = administration_repository or UnconfiguredAdministrationRepository()
+
+    def execute(action, success_status=200):
+        try:
+            result = action()
+            if result is None:
+                return jsonify({'error': 'Registro no encontrado'}), 404
+            return jsonify(_public_data(result)), success_status
+        except ValidationError as error:
+            return jsonify({'error': str(error)}), 400
+        except PersistenceNotConfigured as error:
+            current_app.logger.info('Administration persistence unavailable: %s', error)
+            return jsonify({'error': 'Persistencia de usuarios/técnicos no configurada'}), 503
+
+    @blueprint.post('/login')
+    def login():
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({'error': 'El cuerpo debe ser un objeto JSON'}), 400
+        username = payload.get('username')
+        password = payload.get('password')
+        if not isinstance(username, str) or not username.strip() or not isinstance(password, str) or not password:
+            return jsonify({'error': 'username y password son obligatorios'}), 400
+        if not current_app.config.get('JWT_SECRET_KEY'):
+            return jsonify({'error': 'JWT no está configurado'}), 503
+        try:
+            user = authentication.authenticate(username.strip(), password)
+        except PersistenceNotConfigured as error:
+            current_app.logger.info('Authentication persistence unavailable: %s', error)
+            return jsonify({'error': 'Autenticación no configurada'}), 503
+        if user is None:
+            return jsonify({'error': 'Credenciales inválidas'}), 401
+        user_id = _value(user, 'id')
+        role = _value(user, 'role') or _value(user, 'role_name')
+        if not user_id or not role_has_permission(role, 'inventory:read'):
+            return jsonify({'error': 'El usuario no tiene un rol habilitado'}), 403
+        token = create_access_token(
+            identity=str(user_id),
+            additional_claims={'user_id': user_id, 'role': role},
+        )
+        return jsonify({
+            'access_token': token,
+            'user': {'id': user_id, 'username': _value(user, 'username'), 'role': role},
+        }), 200
+
+    @blueprint.post('/registry')
+    @requires_permission('users:manage')
+    def create_user():
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({'error': 'El cuerpo debe ser un objeto JSON'}), 400
+        username = payload.get('username')
+        password = payload.get('password')
+        role = payload.get('role')
+        if not isinstance(username, str) or not username.strip():
+            return jsonify({'error': 'username es obligatorio'}), 400
+        if not isinstance(password, str) or len(password) < 12:
+            return jsonify({'error': 'password debe tener al menos 12 caracteres'}), 400
+        if role not in ('Super Admin', 'Admin', 'Usuario'):
+            return jsonify({'error': 'role no válido'}), 400
+        body = {'username': username.strip(), 'password_hash': generate_password_hash(password), 'role': role}
+        return execute(lambda: administration.create_user(body), 201)
+
+    @blueprint.get('/users')
+    @requires_permission('users:read')
+    def list_users():
+        return execute(administration.list_users)
+
+    @blueprint.get('/users/<int:user_id>')
+    @requires_permission('users:read')
+    def get_user(user_id):
+        return execute(lambda: administration.get_user(user_id))
+
+    @blueprint.put('/users/<int:user_id>')
+    @requires_permission('users:manage')
+    def update_user(user_id):
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({'error': 'El cuerpo debe ser un objeto JSON'}), 400
+        body = {}
+        if 'username' in payload:
+            username = payload['username']
+            if not isinstance(username, str) or not username.strip():
+                return jsonify({'error': 'username no puede estar vacío'}), 400
+            body['username'] = username.strip()
+        if 'password' in payload:
+            password = payload['password']
+            if not isinstance(password, str) or len(password) < 12:
+                return jsonify({'error': 'password debe tener al menos 12 caracteres'}), 400
+            body['password_hash'] = generate_password_hash(password)
+        if 'role' in payload:
+            if payload['role'] not in ('Super Admin', 'Admin', 'Usuario'):
+                return jsonify({'error': 'role no válido'}), 400
+            body['role'] = payload['role']
+        return execute(lambda: administration.update_user(user_id, body))
+
+    @blueprint.delete('/users/<int:user_id>')
+    @requires_permission('users:manage')
+    def delete_user(user_id):
+        return execute(lambda: administration.delete_user(user_id))
+
+    @blueprint.get('/technicians')
+    @requires_permission('technicians:read')
+    def list_technicians():
+        return execute(administration.list_technicians)
+
+    @blueprint.post('/technicians')
+    @requires_permission('technicians:write')
+    def create_technician():
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({'error': 'El cuerpo debe ser un objeto JSON'}), 400
+        return execute(lambda: administration.create_technician(payload), 201)
+
+    @blueprint.get('/technicians/<int:technician_id>')
+    @requires_permission('technicians:read')
+    def get_technician(technician_id):
+        return execute(lambda: administration.get_technician(technician_id))
+
+    @blueprint.put('/technicians/<int:technician_id>')
+    @requires_permission('technicians:write')
+    def update_technician(technician_id):
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({'error': 'El cuerpo debe ser un objeto JSON'}), 400
+        return execute(lambda: administration.update_technician(technician_id, payload))
+
+    @blueprint.delete('/technicians/<int:technician_id>')
+    @requires_permission('technicians:write')
+    def delete_technician(technician_id):
+        return execute(lambda: administration.delete_technician(technician_id))
+
+    return blueprint

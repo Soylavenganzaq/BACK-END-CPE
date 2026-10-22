@@ -35,7 +35,8 @@ class UsersService:
 
     def update_user(self, user_id: int, username: str = None, password: str = None):
         logger.info(f"Updating user: {user_id}")
-        return self.users_repository.update_user(user_id, username, password)
+        password_hashed = generate_password_hash(password) if password else None
+        return self.users_repository.update_user(user_id, username, password_hashed)
 
     def delete_user(self, user_id: int):
         logger.info(f"Deleting user: {user_id}")

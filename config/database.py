@@ -1,44 +1,40 @@
 import os
-import logging
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.exc import OperationalError
-from models.componente_model import Base   # ✅ cambiamos a componente_model
+from sqlalchemy.engine import make_url
+from sqlalchemy.orm import Session, sessionmaker
 from dotenv import load_dotenv
 
-logging.basicConfig(level=logging.INFO)
-
-# Cargar variables de entorno desde .env
 load_dotenv()
 
-MYSQL_URI = os.getenv('MYSQL_URI')
-SQLITE_URI = 'sqlite:///componentes_local.db'   # ✅ cambiamos el nombre del archivo SQLite
+DATABASE_URL = os.getenv('DATABASE_URL')
+
+
+class DatabaseNotConfigured(RuntimeError):
+    pass
+
+
+_engine = None
+
+
+def create_database_engine(database_url: str | None = None):
+    url = database_url or DATABASE_URL
+    if not url:
+        raise DatabaseNotConfigured('DATABASE_URL no está configurada.')
+
+    parsed_url = make_url(url)
+    if parsed_url.get_backend_name() != 'postgresql':
+        raise ValueError('DATABASE_URL debe apuntar a PostgreSQL.')
+    if parsed_url.drivername == 'postgresql':
+        parsed_url = parsed_url.set(drivername='postgresql+psycopg')
+    return create_engine(parsed_url, pool_pre_ping=True)
+
 
 def get_engine():
-    """
-    Intenta crear una conexión con MySQL. Si falla, usa SQLite local.
-    """
-    if MYSQL_URI:
-        try:
-            engine = create_engine(MYSQL_URI, echo=True)
-            # Probar conexión
-            conn = engine.connect()
-            conn.close()
-            logging.info('Conexión a MySQL exitosa.')
-            return engine
-        except OperationalError:
-            logging.warning('No se pudo conectar a MySQL. Usando SQLite local.')
-    # Fallback a SQLite
-    engine = create_engine(SQLITE_URI, echo=True)
-    return engine
+    global _engine
+    if _engine is None:
+        _engine = create_database_engine()
+    return _engine
 
-engine = get_engine()
-Session = sessionmaker(bind=engine)
-Base.metadata.create_all(engine)
 
 def get_db_session():
-    """
-    Retorna una nueva sesión de base de datos para ser utilizada en los servicios o controladores.
-    """
-    return Session()
-    
+    return sessionmaker(bind=get_engine(), expire_on_commit=False)()
