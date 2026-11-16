@@ -10,7 +10,8 @@ from controllers.inventory_controller import create_inventory_blueprint
 from controllers.user_controllers import create_user_blueprint
 from models.inventory import PersistenceNotConfigured, ValidationError
 from repositories.pending_repositories import (
-    UnconfiguredAdministrationRepository,
+    PostgresInventoryRepository,
+    PostgresUserRepository,
     UnconfiguredInventoryRepository,
     UnconfiguredUserRepository,
 )
@@ -35,13 +36,17 @@ def create_app(
 
     CORS(app, resources={r'/*': {'origins': '*'}})
     JWTManager(app)
+    default_auth_repository = PostgresUserRepository() if DATABASE_URL else UnconfiguredUserRepository()
+    default_administration_repository = PostgresUserRepository() if DATABASE_URL else UnconfiguredUserRepository()
+    default_inventory_repository = PostgresInventoryRepository() if DATABASE_URL else UnconfiguredInventoryRepository()
+
     app.register_blueprint(computador_bp)
     app.register_blueprint(create_user_blueprint(
-        auth_repository=auth_repository or UnconfiguredUserRepository(),
-        administration_repository=administration_repository or UnconfiguredAdministrationRepository(),
+        auth_repository=auth_repository or default_auth_repository,
+        administration_repository=administration_repository or default_administration_repository,
     ))
     app.register_blueprint(create_inventory_blueprint(
-        repository=inventory_repository or UnconfiguredInventoryRepository(),
+        repository=inventory_repository or default_inventory_repository,
     ))
 
     @app.errorhandler(DatabaseNotConfigured)
